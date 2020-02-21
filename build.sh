@@ -12,3 +12,4 @@ gcc hello/graphics.c -lamiga -lm -o build/graphics
 gcc window/window.c -lamiga -lm -o build/window
 gcc screen/doublebuffer.c -lamiga -lm -o build/doublebuffer
 gcc screen/fullscreen.c -lamiga -lm -o build/fullscreen
+gcc cybergraphx/listmodes.c -lamiga -lm -o build/cgx-listmodes
