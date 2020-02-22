@@ -20,10 +20,7 @@ static struct Library *CyberGfxBase;
 // AROS issues:
 //
 // - CyberModeNode.ModeText is not null terminated
-// - when no match returns 'null' node instead of empty list (cgx v3 41.4 returns NULL)
-// - Node.ln_Name on nodes is 'null' instead of the same as CyberModeNode.ModeText
-// 8bit filter:
-// - doesn't filter by CYBRMREQ_CModelArray
+// - doesn't filter by CYBRMREQ_CModelArray, although min and max depth work
 //
 
 void AOS_cleanupAndExit(int exitCode) {
