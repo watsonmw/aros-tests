@@ -45,13 +45,12 @@ void AOS_cleanupAndExit(int exitCode) {
 void printModeList(struct List* list) {
     if (list) {
         struct Node* node = list->lh_Head;
-        printf("list: %x %x %x\n", list->lh_Head, list->lh_Tail, list->lh_TailPred);
-        while (node != NULL && node != list->lh_TailPred) {
+        printf("list: %x %x %x empty:%d\n", list->lh_Head, list->lh_Tail, list->lh_TailPred, IsListEmpty(list));
+        for (; node->ln_Succ != NULL; node = node->ln_Succ) {
             printf("node: %x %s %x %x\n", node, node->ln_Name, node->ln_Type, node->ln_Pred);
             struct CyberModeNode* cgxNode = (struct CyberModeNode*) node;
             printf("mode %d %d %d %d -%s-\n", cgxNode->Width, cgxNode->Height, cgxNode->Depth,
                    cgxNode->DisplayID, cgxNode->ModeText);
-            node = node->ln_Succ;
         }
         FreeCModeList(list);
     }
@@ -73,13 +72,14 @@ void AOS_init() {
     UWORD ModelArrayLUT8[] = {PIXFMT_LUT8, ~0};
     struct List* list = AllocCModeListTags(CYBRMREQ_CModelArray, (ULONG) ModelArrayLUT8, TAG_END);
 
-    printf("--- List all 8bit modes using CYBRMREQ_CModelArray - instead AROS returns 1 junk / empty node\n");
+    printf("--- List all 8bit modes using CYBRMREQ_CModelArray - AROS returns empty / head node and no 8bit modes\n");
     printModeList(list);
 
-    printf("\"--- List all 8bit modes using CYBRMREQ_Min/MaxDepth - max len CyberModeNode.ModeText not null terminated\n");
+    printf("\"--- List all 8bit modes using CYBRMREQ_Min/MaxDepth - AROS returns 8bit modes, but CyberModeNode.ModeText not null terminated / contains extra chars\n");
     list = AllocCModeListTags(CYBRMREQ_MinDepth, 8,
                               CYBRMREQ_MaxDepth, 8,
                               TAG_END);
+
     printModeList(list);
 }
 
