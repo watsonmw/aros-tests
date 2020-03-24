@@ -11,7 +11,6 @@
 #include <clib/graphics_protos.h>
 #include <clib/exec_protos.h>
 #include <clib/asl_protos.h>
-#include <clib/dos_protos.h>
 
 #include <cybergraphx/cybergraphics.h>
 #include <inline/cybergraphics.h>
@@ -21,7 +20,9 @@
 typedef unsigned char u8;
 
 /*
- * Fullscreen 8bit LUT Cybergraphx example.
+ * Fullscreen doublebuffer 8bit LUT Cybergraphx example.
+ *
+ * Uses the AmigaOS recommended way of double buffering the screen.
  *
  * Writes directly to screen bitmap locking and unlocking as needed, as recommended in Cybergraphx docs.
  *
@@ -37,6 +38,9 @@ static struct Library* AslBase;
 
 static struct Screen* aosScreen;
 static struct Window* aosWindow;
+static struct ScreenBuffer* aosScreenBuffer[2];
+static struct MsgPort* aosDpDispPort;
+static struct MsgPort* aosDpSafePort;
 
 static int screenWidth = 0;
 static int screenHeight = 0;
@@ -70,6 +74,26 @@ void AOS_cleanupAndExit(int exitCode) {
         CloseWindow(aosWindow);
         ClearPointer(aosWindow);
         aosWindow = 0;
+    }
+
+    if (aosScreenBuffer[0]) {
+        WaitBlit(); /* FreeScreenBuffer() docs recommend this WaitBlit() for buggy graphics.library versions */
+        FreeScreenBuffer(aosScreen, aosScreenBuffer[0]);
+        aosScreenBuffer[0] = 0;
+    }
+
+    if (aosScreenBuffer[1]) {
+        WaitBlit(); /* FreeScreenBuffer() docs recommend this WaitBlit() for buggy graphics.library versions */
+        FreeScreenBuffer(aosScreen, aosScreenBuffer[1]);
+        aosScreenBuffer[1] = 0;
+    }
+
+    if (aosDpDispPort) {
+        DeleteMsgPort(aosDpDispPort);
+    }
+
+    if (aosDpSafePort) {
+        DeleteMsgPort(aosDpSafePort);
     }
 
     if (aosScreen) {
@@ -195,6 +219,17 @@ void AOS_init() {
     }
 
     SetPointer(aosWindow, nullPointerGraphic, 1, 16, 0, 0);
+
+    aosDpDispPort = CreateMsgPort();
+    aosDpSafePort = CreateMsgPort();
+
+    aosScreenBuffer[0] = AllocScreenBuffer(aosScreen, NULL, SB_SCREEN_BITMAP);
+    aosScreenBuffer[1] = AllocScreenBuffer(aosScreen, NULL, 0);
+
+    for (int i = 0; i < 2; i++) {
+        aosScreenBuffer[i]->sb_DBufInfo->dbi_DispMessage.mn_ReplyPort = aosDpDispPort;
+        aosScreenBuffer[i]->sb_DBufInfo->dbi_SafeMessage.mn_ReplyPort = aosDpSafePort;
+    }
 }
 
 void moveInsect(Insect* insect) {
@@ -288,6 +323,10 @@ int main(int argc, char** argv) {
     struct RastPort rastPort;
     Insect insect[30];
 
+    u8 dbSafeToChange = TRUE;
+    u8 dbSafeToWrite = TRUE;
+    u8 dbCurBuffer = 1;
+
     AOS_init();
     srand(4);
 
@@ -300,11 +339,18 @@ int main(int argc, char** argv) {
     InitRastPort(&rastPort);
 
     while (AOS_processEvents()) {
+        if (!dbSafeToWrite) {
+            while (!GetMsg(aosDpSafePort)) {
+                Wait(1 << (aosDpSafePort->mp_SigBit));
+            }
+            dbSafeToWrite = TRUE;
+        }
+
         u8* buffer = NULL;
         ULONG bytesPerRow = 0;
         ULONG pixelFormat = 0;
 
-        APTR handle = LockBitMapTags(aosScreen->RastPort.BitMap,
+        APTR handle = LockBitMapTags(aosScreenBuffer[dbCurBuffer]->sb_BitMap,
                 LBMI_BASEADDRESS, (ULONG)&buffer,
                 LBMI_BYTESPERROW, (ULONG)&bytesPerRow,
                 LBMI_PIXFMT, (ULONG)&pixelFormat,
@@ -327,7 +373,34 @@ int main(int argc, char** argv) {
             UnLockBitMap(handle);
         }
 
-        Delay(1);
+        if (!dbSafeToChange) {
+            while (!GetMsg(aosDpDispPort)) {
+                Wait(1 << (aosDpDispPort->mp_SigBit));
+            }
+            dbSafeToChange = TRUE;
+        }
+
+        if (ChangeScreenBuffer(aosScreen, aosScreenBuffer[dbCurBuffer])) {
+            dbSafeToChange = FALSE;
+            dbSafeToWrite = FALSE;
+            /* toggle current buffer */
+            dbCurBuffer ^= 1;
+        } else {
+            printf("Change screen buff failed\n");
+        }
+    }
+
+    /* cleanup pending messages */
+    if (!dbSafeToChange) {
+        while (!GetMsg(aosDpDispPort)) {
+            Wait(1 << (aosDpDispPort->mp_SigBit));
+        }
+    }
+
+    if (!dbSafeToWrite) {
+        while (!GetMsg(aosDpSafePort)) {
+            Wait(1 << (aosDpSafePort->mp_SigBit));
+        }
     }
 
     AOS_cleanupAndExit(0);
