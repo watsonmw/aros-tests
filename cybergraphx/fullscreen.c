@@ -1,17 +1,19 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <math.h>
-#include <memory.h>
+#include <string.h>
 
 #include <intuition/intuition.h>
 #include <intuition/screens.h>
 #include <graphics/gfxbase.h>
 #include <libraries/asl.h>
+#include <devices/timer.h>
+
 #include <clib/intuition_protos.h>
 #include <clib/graphics_protos.h>
 #include <clib/exec_protos.h>
 #include <clib/asl_protos.h>
 #include <clib/dos_protos.h>
+#include <clib/timer_protos.h>
 
 #include <cybergraphx/cybergraphics.h>
 #include <inline/cybergraphics.h>
@@ -19,21 +21,27 @@
 #define KC_ESC 0x45
 
 typedef unsigned char u8;
+typedef short u16;
+typedef unsigned long long u64;
 
 /*
  * Fullscreen 8bit LUT Cybergraphx example.
  *
  * Writes directly to screen bitmap locking and unlocking as needed, as recommended in Cybergraphx docs.
  *
- * Works in UAE with 3.1.4 and RTG enabled.
+ * Draws moving vertical lines so you can see any screen tearing or jank.
  *
- * Doesn't currently (24/3/2020) work with AROS.
+ * Works in UAE with:
+ * - 3.1 with RTG enabled
+ * - AROS
  */
 
 static struct IntuitionBase* IntuitionBase;
 static struct GfxBase* GfxBase;
 static struct Library* CyberGfxBase;
 static struct Library* AslBase;
+static struct IORequest TimerDevice;
+struct Device* TimerBase; // exported so AOS timer func stubs can use
 
 static struct Screen* aosScreen;
 static struct Window* aosWindow;
@@ -41,34 +49,22 @@ static struct Window* aosWindow;
 static int screenWidth = 0;
 static int screenHeight = 0;
 
-static UWORD nullPointerGraphic[] = {
-        0x0000, 0x0000, /* reserved, must be NULL */
-        0x0000, 0x0000, /* 1 row of image data */
-        0x0000, 0x0000  /* reserved, must be NULL */
+static UWORD MouseCursor_NullGraphic[] = {
+        0x0000, 0x0000, // reserved, must be NULL
+        0x0000, 0x0000, // 1 row of image data
+        0x0000, 0x0000  // reserved, must be NULL
 };
 
-typedef struct sInsect {
-    long dx;
-    long dy;
-    long x;
-    long y;
-    unsigned char angle;
-    unsigned char dangle;
-    int speed;
-    int c;
-} Insect;
-
-static long fcos[256];
-static long fsin[256];
-
-static short colours[16] = {
-    0x0000, 0x0f0f
+static u16 PaletteColours[3] = {
+        0x0000, // background
+        0x0fff, // bars
+        0x04f4, // text
 };
 
 void AOS_cleanupAndExit(int exitCode) {
     if (aosWindow) {
-        CloseWindow(aosWindow);
         ClearPointer(aosWindow);
+        CloseWindow(aosWindow);
         aosWindow = 0;
     }
 
@@ -93,14 +89,17 @@ void AOS_cleanupAndExit(int exitCode) {
         CloseLibrary((struct Library*) IntuitionBase);
     }
 
+    if (TimerDevice.io_Device) {
+        CloseDevice(&TimerDevice);
+    }
+
     exit(exitCode);
 }
 
-// GCC hooks handling - other compilers require different syntax see hooks.h
+// GCC Hooks handling - other compilers require different syntax see hooks.h
 ULONG Hook_OnlyRTGModes(register struct Hook* hook __asm("a0"),
                         register struct ScreenModeRequester* smr __asm("a2"),
-                        register ULONG displayModeId __asm("a1"))
-{
+                        register ULONG displayModeId __asm("a1")) {
     return IsCyberModeID(displayModeId) && GetCyberIDAttr(CYBRIDATTR_DEPTH, displayModeId) == 8;
 }
 
@@ -117,18 +116,18 @@ void AOS_init() {
         AOS_cleanupAndExit(0);
     }
 
-    if (!(CyberGfxBase = OpenLibrary("cybergraphics.library",41))) {
+    if (!(CyberGfxBase = OpenLibrary("cybergraphics.library", 41))) {
         AOS_cleanupAndExit(0);
     }
 
     ULONG modeId = INVALID_ID;
 
     struct Hook screenModeFilterHook;
-    screenModeFilterHook.h_Entry = (HOOKFUNC)Hook_OnlyRTGModes;
+    screenModeFilterHook.h_Entry = (HOOKFUNC) Hook_OnlyRTGModes;
     screenModeFilterHook.h_SubEntry = NULL;
     screenModeFilterHook.h_Data = 0;
 
-    struct ScreenModeRequester *smr = (struct ScreenModeRequester*)
+    struct ScreenModeRequester* smr = (struct ScreenModeRequester*)
             AllocAslRequestTags(ASL_ScreenModeRequest,
                                 ASLSM_TitleText, "Select Screen Res",
                                 ASLSM_MinDepth, 8,
@@ -169,7 +168,7 @@ void AOS_init() {
         AOS_cleanupAndExit(0);
     }
 
-    LoadRGB4(&aosScreen->ViewPort, colours, 2);
+    LoadRGB4(&aosScreen->ViewPort, PaletteColours, 3);
 
     aosWindow = OpenWindowTags(NULL,
                                WA_Left, 0,
@@ -194,64 +193,11 @@ void AOS_init() {
         AOS_cleanupAndExit(0);
     }
 
-    SetPointer(aosWindow, nullPointerGraphic, 1, 16, 0, 0);
-}
+    // Empty pointer
+    SetPointer(aosWindow, MouseCursor_NullGraphic, 1, 16, 0, 0);
 
-void moveInsect(Insect* insect) {
-    if (insect->c <= 0) {
-        insect->c = rand() % 10 + 5;
-        insect->dangle = rand() % 10 - 5;
-    }
-
-    insect->c--;
-    insect->angle += insect->dangle;
-    insect->dx = insect->speed * fcos[insect->angle];
-    insect->dy = insect->speed * fsin[insect->angle];
-    insect->x += insect->dx;
-    insect->y += insect->dy;
-
-    if (insect->x < 0) {
-        insect->x = 0;
-        insect->angle = 128 - insect->angle;
-        insect->c = rand() % 10 + 10;
-    }
-
-    if (insect->x >= (screenWidth << 16)) {
-        insect->x = ((screenWidth - 1) << 16);
-        insect->angle = 128 - insect->angle;
-        insect->c = rand() % 10 + 10;
-    }
-
-    if (insect->y < 0) {
-        insect->y = 0;
-        insect->angle = 256 - insect->angle;
-        insect->c = rand() % 10 + 10;
-    }
-
-    if (insect->y >= (screenHeight << 16)) {
-        insect->y = ((screenHeight - 1) << 16);
-        insect->angle = 256 - insect->angle;
-        insect->c = rand() % 10 + 10;
-    }
-}
-
-void initInsect(Insect* i) {
-    i->dx = 0;
-    i->dy = 0;
-    i->x = (rand() % screenWidth << 16);
-    i->y = (rand() % screenHeight << 16);
-    i->angle = 0;
-    i->dangle = 0;
-    i->speed = 3;
-    i->c = 0;
-}
-
-void buildLookups() {
-    int i;
-    for (i = 0; i < 256; i++) {
-        fsin[i] = 65536 * sin(i * M_PI * 2 / 256);
-        fcos[i] = 65536 * cos(i * M_PI * 2 / 256);
-    }
+    OpenDevice((CONST_STRPTR)"timer.device", 0, &TimerDevice, 0);
+    TimerBase = TimerDevice.io_Device;
 }
 
 static int AOS_processEvents() {
@@ -284,31 +230,55 @@ static int AOS_processEvents() {
     return !close;
 }
 
+u64 AOS_GetClockCount() {
+    struct EClockVal clock;
+    ReadEClock(&clock);
+    return (((u64) clock.ev_hi) << 32u) | clock.ev_lo;
+}
+
+ULONG AOS_GetClockCountAndInterval(ULONG* tickInterval) {
+    struct EClockVal clock;
+    *tickInterval = ReadEClock(&clock);
+    return (((u64) clock.ev_hi) << 32u) | clock.ev_lo;
+}
+
 int main(int argc, char** argv) {
-    struct RastPort rastPort;
-    Insect insect[30];
-
     AOS_init();
-    srand(4);
+    struct RastPort* rastPort = &aosScreen->RastPort;
 
-    for (int i = 0; i < 30; i++) {
-        initInsect(&insect[i]);
-    }
+    int verticalLineX = 0;
+    int lineSpeed = screenWidth / 100;
 
-    buildLookups();
+    int frames = 0;
+    int fps = 0;
+    ULONG updateFpsTimer = 0;
+    ULONG tickInterval = 0;
+    char frameRateString[32];
 
-    InitRastPort(&rastPort);
+    u64 prevClock = AOS_GetClockCountAndInterval(&tickInterval);
 
     while (AOS_processEvents()) {
         u8* buffer = NULL;
         ULONG bytesPerRow = 0;
         ULONG pixelFormat = 0;
 
-        APTR handle = LockBitMapTags(aosScreen->RastPort.BitMap,
-                LBMI_BASEADDRESS, (ULONG)&buffer,
-                LBMI_BYTESPERROW, (ULONG)&bytesPerRow,
-                LBMI_PIXFMT, (ULONG)&pixelFormat,
-                TAG_DONE);
+        WaitTOF();
+
+        APTR handle = LockBitMapTags(rastPort->BitMap,
+                                     LBMI_BASEADDRESS, (ULONG) &buffer,
+                                     LBMI_BYTESPERROW, (ULONG) &bytesPerRow,
+                                     LBMI_PIXFMT, (ULONG) &pixelFormat,
+                                     TAG_DONE);
+        verticalLineX += lineSpeed;
+        if (verticalLineX >= screenWidth - 16) {
+            verticalLineX = screenWidth - 17;
+            lineSpeed = -lineSpeed;
+        }
+
+        if (verticalLineX < 0) {
+            verticalLineX = 0;
+            lineSpeed = -lineSpeed;
+        }
 
         if (handle && buffer) {
             if (pixelFormat != PIXFMT_LUT8) {
@@ -317,17 +287,55 @@ int main(int argc, char** argv) {
                 AOS_cleanupAndExit(0);
             }
 
-            memset(buffer, 0, bytesPerRow * screenHeight);
-            for (int j = 0; j < 30; j++) {
-                moveInsect(&insect[j]);
-                int x = insect[j].x >> 16;
-                int y = insect[j].y >> 16;
-                buffer[x + (y * bytesPerRow)] = 1;
+            u8* bufferLine = buffer;
+            for (int i = 0; i < screenHeight; i++) {
+                int j = 0;
+                int end = verticalLineX;
+                for (; j < end && j < screenWidth; j++) {
+                    bufferLine[j] = 0;
+                }
+                end += 4;
+                for (; j < end && j < screenWidth; j++) {
+                    bufferLine[j] = 1;
+                }
+                end += 8;
+                for (; j < end && j < screenWidth; j++) {
+                    bufferLine[j] = 0;
+                }
+                end += 4;
+                for (; j < end && j < screenWidth; j++) {
+                    bufferLine[j] = 1;
+                }
+                for (; j < screenWidth; j++) {
+                    bufferLine[j] = 0;
+                }
+
+                bufferLine += bytesPerRow;
             }
+
             UnLockBitMap(handle);
         }
 
-        Delay(1);
+        frames++;
+
+        u64 currentClock = AOS_GetClockCount();
+        ULONG elapsed = ((ULONG)(currentClock - prevClock)) / (tickInterval / 1000);
+        prevClock = currentClock;
+        updateFpsTimer += elapsed;
+        if (updateFpsTimer > 1000) {
+            fps = frames - 1;
+            frames = 0;
+            updateFpsTimer = updateFpsTimer - 1000;
+        }
+
+        if (fps > 0) {
+            snprintf(frameRateString, 32, "%ld fps", fps);
+
+            SetAPen(rastPort, 2);
+            SetBPen(rastPort, 0);
+            Move(rastPort, 10, 10);
+            Text(rastPort, (CONST_STRPTR)frameRateString, strlen(frameRateString));
+        }
     }
 
     AOS_cleanupAndExit(0);

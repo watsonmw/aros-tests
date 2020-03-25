@@ -14,4 +14,3 @@ gcc screen/doublebuffer.c -lamiga -lm -o build/doublebuffer
 gcc screen/fullscreen.c -lamiga -lm -o build/fullscreen
 gcc cybergraphx/listmodes.c -lamiga -lm -o build/cgx-listmodes
 gcc cybergraphx/fullscreen.c -lamiga -lm -o build/cgx-fullscreen
-gcc cybergraphx/doublebuffer.c -lamiga -lm -o build/cgx-doublebuffer
